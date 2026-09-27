@@ -1,0 +1,19 @@
+%YAML:1.0
+capture:
+  output_directory: "sessions"
+  exposure_time_us: 10000.0
+  gain: 0.0
+  frame_rate: 10.0
+  sdk_buffer_count: 4
+mono_target:
+  type: "symmetric_circles"
+  columns: 7
+  rows: 7
+  spacing_m: 0.03
+stereo_target:
+  dictionary: "DICT_6X6_50"
+  marker_ids: [1, 2, 3, 4]
+  marker_length_m: 0.20
+  center_spacing_x_m: 1.10
+  center_spacing_y_m: 0.70
+

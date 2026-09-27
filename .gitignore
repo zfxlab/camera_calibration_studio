@@ -1,0 +1,7 @@
+/build/
+/sessions/
+/results/
+*.user
+*.autosave
+.cache
+
