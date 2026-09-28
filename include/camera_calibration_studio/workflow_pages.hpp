@@ -2,6 +2,7 @@
 
 #include "camera_calibration_studio/focus_analyzer.hpp"
 #include "camera_calibration_studio/hik_camera.hpp"
+#include "camera_calibration_studio/recording.hpp"
 
 #include <QLabel>
 #include <QWidget>
@@ -17,6 +18,7 @@ class QListWidget;
 class QPushButton;
 class QSpinBox;
 class QTimer;
+class QTabWidget;
 
 namespace calibration_studio {
 
@@ -58,6 +60,10 @@ class MonoCameraPage final : public QWidget {
   void updateFrame();
   void chooseSession();
   void captureImage();
+  void toggleRecording();
+  void chooseRecording();
+  void loadRecording();
+  void importSelectedFrames();
   void resetFocus();
   void chooseImages();
   void chooseOutput();
@@ -68,16 +74,22 @@ class MonoCameraPage final : public QWidget {
   void setStreamingUi(bool streaming);
   void status(const QString& text, bool error = false);
 
+  void stopRecording(bool open_review);
+  void setReviewSelection(bool selected);
   std::unique_ptr<HikCamera> camera_;
   FocusAnalyzer focus_analyzer_;
   cv::Rect focus_roi_;
   FocusResult last_focus_;
   QTimer* timer_{nullptr};
+  ImageSequenceRecorder recorder_;
   QComboBox* device_{nullptr};
   QDoubleSpinBox* exposure_{nullptr};
   QDoubleSpinBox* gain_{nullptr};
   QDoubleSpinBox* frame_rate_{nullptr};
+  QDoubleSpinBox* recording_rate_{nullptr};
   QSpinBox* buffer_count_{nullptr};
+  QPushButton* record_button_{nullptr};
+  QTabWidget* stages_{nullptr};
   QPushButton* start_stop_{nullptr};
   PreviewLabel* preview_{nullptr};
   QLabel* roi_preview_{nullptr};
@@ -85,6 +97,9 @@ class MonoCameraPage final : public QWidget {
   QLabel* status_{nullptr};
   QLineEdit* session_{nullptr};
   QListWidget* captures_{nullptr};
+  QLabel* recording_status_{nullptr};
+  QLineEdit* recording_path_{nullptr};
+  QListWidget* review_list_{nullptr};
   QLineEdit* images_{nullptr};
   QLineEdit* camera_name_{nullptr};
   QLineEdit* output_{nullptr};
@@ -103,6 +118,10 @@ class StereoCameraPage final : public QWidget {
   void toggleCameras();
   void updateFrames();
   void chooseSession();
+  void toggleRecording();
+  void chooseRecording();
+  void loadRecording();
+  void importSelectedPairs();
   void capturePair();
   void chooseLeftImages();
   void chooseRightImages();
@@ -112,19 +131,25 @@ class StereoCameraPage final : public QWidget {
   void calibrate();
 
  private:
+  void stopRecording(bool open_review);
+  void setReviewSelection(bool selected);
   CameraSettings settings() const;
   void setStreamingUi(bool streaming);
   void status(const QString& text, bool error = false);
 
   std::unique_ptr<HikCamera> left_camera_;
   std::unique_ptr<HikCamera> right_camera_;
+  ImageSequenceRecorder recorder_;
   QTimer* timer_{nullptr};
   QComboBox* left_device_{nullptr};
   QComboBox* right_device_{nullptr};
   QDoubleSpinBox* exposure_{nullptr};
   QDoubleSpinBox* gain_{nullptr};
   QDoubleSpinBox* frame_rate_{nullptr};
+  QDoubleSpinBox* recording_rate_{nullptr};
   QSpinBox* buffer_count_{nullptr};
+  QPushButton* record_button_{nullptr};
+  QTabWidget* stages_{nullptr};
   QPushButton* start_stop_{nullptr};
   PreviewLabel* left_preview_{nullptr};
   PreviewLabel* right_preview_{nullptr};
@@ -136,6 +161,9 @@ class StereoCameraPage final : public QWidget {
   QLineEdit* right_images_{nullptr};
   QLineEdit* left_intrinsics_{nullptr};
   QLineEdit* right_intrinsics_{nullptr};
+  QLabel* recording_status_{nullptr};
+  QLineEdit* recording_path_{nullptr};
+  QListWidget* review_list_{nullptr};
   QLineEdit* output_{nullptr};
   QPushButton* calibrate_button_{nullptr};
 };

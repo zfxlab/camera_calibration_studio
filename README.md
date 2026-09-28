@@ -46,8 +46,9 @@ export LD_LIBRARY_PATH=/opt/MVS/lib/64:${LD_LIBRARY_PATH}
 ./build/camera_calibration_studio
 ```
 
-界面分为两个完整工作流页面。切换页面时会自动关闭上一页相机，避免两个页面同时占用同一
-设备。
+界面分为两个完整工作流页面，每页再按“实时采集 → 选帧整理 → 标定计算”分成三个阶段。
+切换单目/双目页面时会自动关闭上一页相机；录制中离开实时采集阶段会先完成队列写入并安全
+停止录像。
 
 ### 单相机：对焦、采样和内参
 
@@ -56,8 +57,10 @@ export LD_LIBRARY_PATH=/opt/MVS/lib/64:${LD_LIBRARY_PATH}
 3. 点击 `Start camera`；
 4. 在主预览上拖动绿色 ROI，通过 `Current/Smoothed/Peak/Relative` 调整镜头；
 5. 检查原始 ROI、平均亮度以及过曝/欠曝比例；
-6. 锁紧镜头后点击 `Capture mono image`；
-7. 采集 20–30 张多样姿态后直接在本页运行单目标定。
+6. 可以点击 `Capture mono image` 单张采样，也可以设置录像帧率后点击 `Start recording`；
+7. 单人操作时缓慢移动标定板，完成后点击 `Stop recording`；
+8. 在 `Review frames` 中查看无损缩略图，勾选需要的帧并加入正式数据集；
+9. 进入 `Calibration`，使用20–30张多样姿态图片计算内参。
 
 左右相机应分别进入此页面完成对焦、采图和内参计算。切换相机或 ROI 后使用
 `Reset focus peak` 重新建立相对峰值。不同相机或不同 ROI 的绝对清晰度不能直接比较。
@@ -66,9 +69,10 @@ export LD_LIBRARY_PATH=/opt/MVS/lib/64:${LD_LIBRARY_PATH}
 
 1. 选择不同的左右相机并启动；
 2. 确认左右预览正常，并观察 `Latest receive-time delta`；
-3. 保持 ArUco 板静止后点击 `Capture stereo pair`；
-4. 采集 20–40 个多样姿态；
-5. 选择左右内参 YAML，在本页计算并保存双目结果。
+3. 可以保持 ArUco 板静止后点击 `Capture stereo pair`，也可以开始双目录制；
+4. 录像仅接收时间差不超过 `0.15 s` 的图像对；
+5. 在 `Review pairs` 中以左右不可拆分的图像对进行勾选并加入正式数据集；
+6. 进入 `Calibration`，选择左右内参 YAML 并计算双目结果。
 
 目录结构：
 
@@ -78,11 +82,19 @@ session/
 │   └── SERIAL/
 │       ├── 000001.png
 │       └── 000002.png
-└── stereo/
-    ├── left/
-    │   └── 000001.png
-    └── right/
-        └── 000001.png
+├── stereo/
+│   ├── left/
+│   │   └── 000001.png
+│   └── right/
+│       └── 000001.png
+└── recordings/
+    ├── mono_YYYYMMDD_HHMMSS/
+    │   ├── frames/
+    │   └── manifest.csv
+    └── stereo_YYYYMMDD_HHMMSS/
+        ├── left/
+        ├── right/
+        └── manifest.csv
 ```
 
 双目保存要求两张最新图像均不超过 `0.5 s`，接收时刻差不超过 `0.15 s`。这适用于静止
@@ -134,6 +146,6 @@ X_right = R_right_left * X_left + t_right_left
 
 - 当前使用普通针孔 `plumb_bob` 模型，尚未提供鱼眼模型界面；
 - 当前拍照使用自由运行相机的最新帧，不是硬件同步触发；
-- 当前 GUI 展示采集文件列表，但尚未提供缩略图级逐张启用/禁用；
+- 录像回看支持缩略图勾选，但尚未自动检测标定板或自动筛选重复姿态；
 - 当前双目板参数使用默认值，配置文件将在后续版本接入 GUI；
 - 正式使用前应通过校正预览和独立验证图片检查极线误差。

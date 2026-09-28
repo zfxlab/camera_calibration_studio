@@ -1,6 +1,7 @@
 #include "camera_calibration_studio/calibration.hpp"
 #include "camera_calibration_studio/dataset.hpp"
 #include "camera_calibration_studio/focus_analyzer.hpp"
+#include "camera_calibration_studio/recording.hpp"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -65,6 +66,30 @@ int main() {
   if (constant_result.current_score != 0.0 || constant_result.roi.area() <= 0) {
     std::cerr << "constant image focus result is invalid\n";
     return 1;
+  const auto recording_directory = std::filesystem::temp_directory_path() /
+                                   "camera_calibration_studio_recording_test";
+  std::filesystem::remove_all(recording_directory);
+  calibration_studio::ImageSequenceRecorder recorder;
+  if (!recorder.startMono(recording_directory, "test_serial", 1000.0, error)) {
+    std::cerr << "failed to start test recording: " << error << '\n';
+    return 1;
+  }
+  calibration_studio::CapturedFrame frame;
+  frame.image = sharp;
+  frame.sequence = 1;
+  frame.received_at = std::chrono::steady_clock::now();
+  if (!recorder.submitMono(frame)) {
+    std::cerr << "failed to submit test recording frame\n";
+    return 1;
+  }
+  recorder.submitMono(frame);
+  recorder.stop();
+  if (calibration_studio::listImages(recording_directory / "frames").size() != 1 ||
+      !std::filesystem::exists(recording_directory / "manifest.csv") ||
+      recorder.stats().written != 1) {
+    std::cerr << "recording output or duplicate suppression is invalid\n";
+    return 1;
+  }
   }
   return 0;
 }

@@ -18,6 +18,7 @@ add_library(calibration_core
   src/calibration.cpp
   src/dataset.cpp
   src/focus_analyzer.cpp
+  src/recording.cpp
 )
 target_include_directories(calibration_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

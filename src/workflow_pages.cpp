@@ -10,9 +10,12 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QImage>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
+#include <QListView>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -21,9 +24,11 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QThread>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <chrono>
@@ -64,6 +69,7 @@ void fillDeviceCombo(QComboBox* combo, const std::vector<CameraDescriptor>& devi
                      const bool include_none) {
   combo->clear();
   if (include_none) {
+
     combo->addItem("None", QString{});
   }
   for (const auto& device : devices) {
@@ -71,6 +77,18 @@ void fillDeviceCombo(QComboBox* combo, const std::vector<CameraDescriptor>& devi
         device.serial_number + "  " + device.model_name + "  [" + device.transport + "]");
     combo->addItem(label, QString::fromStdString(device.serial_number));
   }
+}
+
+void configureReviewList(QListWidget* list) {
+  list->setViewMode(QListView::IconMode);
+  list->setIconSize(QSize(180, 135));
+  list->setGridSize(QSize(210, 180));
+  list->setResizeMode(QListView::Adjust);
+  list->setMovement(QListView::Static);
+}
+
+QString recordingName(const QString& prefix) {
+  return prefix + '_' + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
 }
 
 QImage toQImage(const cv::Mat& image) {
@@ -176,6 +194,20 @@ void PreviewLabel::paintEvent(QPaintEvent* event) {
 MonoCameraPage::MonoCameraPage(QWidget* parent)
     : QWidget(parent), camera_(std::make_unique<HikCamera>()) {
   auto* root = new QVBoxLayout(this);
+  stages_ = new QTabWidget;
+  auto* live_page = new QWidget;
+  auto* live_root = new QVBoxLayout(live_page);
+  auto* review_page = new QWidget;
+  auto* review_root = new QVBoxLayout(review_page);
+  auto* calibration_page = new QWidget;
+  auto* calibration_root = new QVBoxLayout(calibration_page);
+  stages_->addTab(live_page, "1  Live capture");
+  stages_->addTab(review_page, "2  Review frames");
+  stages_->addTab(calibration_page, "3  Calibration");
+  root->addWidget(stages_, 1);
+  connect(stages_, &QTabWidget::currentChanged, this, [this](const int index) {
+    if (index != 0 && recorder_.recording()) stopRecording(index == 1);
+  });
   auto* controls = new QHBoxLayout;
   device_ = new QComboBox;
   auto* refresh = new QPushButton("Refresh");
@@ -205,7 +237,7 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   controls->addWidget(buffer_count_);
   controls->addWidget(refresh);
   controls->addWidget(start_stop_);
-  root->addLayout(controls);
+  live_root->addLayout(controls);
   connect(refresh, &QPushButton::clicked, this, &MonoCameraPage::refreshDevices);
   connect(start_stop_, &QPushButton::clicked, this, &MonoCameraPage::toggleCamera);
 
@@ -227,7 +259,7 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   focus_layout->addWidget(roi_preview_, 1);
   focus_layout->addWidget(reset);
   center->addWidget(focus_group, 1);
-  root->addLayout(center, 1);
+  live_root->addLayout(center, 1);
   connect(reset, &QPushButton::clicked, this, &MonoCameraPage::resetFocus);
   preview_->roi_selected = [this](const cv::Rect& roi) {
     focus_roi_ = roi;
@@ -249,10 +281,51 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   captures_->setMaximumHeight(90);
   capture_layout->addLayout(session_row);
   capture_layout->addWidget(captures_);
-  root->addWidget(capture_group);
+  live_root->addWidget(capture_group);
   connect(choose_session, &QPushButton::clicked, this, &MonoCameraPage::chooseSession);
   connect(capture, &QPushButton::clicked, this, &MonoCameraPage::captureImage);
   capture->setObjectName("captureButton");
+  auto* recording_row = new QHBoxLayout;
+  recording_rate_ = new QDoubleSpinBox;
+  recording_rate_->setRange(0.2, 10.0);
+  recording_rate_->setValue(3.0);
+  recording_rate_->setSuffix(" FPS");
+  record_button_ = new QPushButton("Start recording");
+  recording_status_ = new QLabel("Not recording");
+  recording_row->addWidget(new QLabel("Recording rate:"));
+  recording_row->addWidget(recording_rate_);
+  recording_row->addWidget(record_button_);
+  recording_row->addWidget(recording_status_, 1);
+  capture_layout->addLayout(recording_row);
+  connect(record_button_, &QPushButton::clicked, this, &MonoCameraPage::toggleRecording);
+
+  auto* recording_select = new QHBoxLayout;
+  recording_path_ = new QLineEdit;
+  recording_path_->setReadOnly(true);
+  auto* browse_recording = new QPushButton("Open recording");
+  auto* reload_recording = new QPushButton("Reload");
+  recording_select->addWidget(new QLabel("Recording:"));
+  recording_select->addWidget(recording_path_, 1);
+  recording_select->addWidget(browse_recording);
+  recording_select->addWidget(reload_recording);
+  review_root->addLayout(recording_select);
+  review_list_ = new QListWidget;
+  configureReviewList(review_list_);
+  review_root->addWidget(review_list_, 1);
+  auto* review_actions = new QHBoxLayout;
+  auto* select_all = new QPushButton("Select all");
+  auto* select_none = new QPushButton("Select none");
+  auto* import = new QPushButton("Add selected frames to dataset");
+  review_actions->addWidget(select_all);
+  review_actions->addWidget(select_none);
+  review_actions->addStretch();
+  review_actions->addWidget(import);
+  review_root->addLayout(review_actions);
+  connect(browse_recording, &QPushButton::clicked, this, &MonoCameraPage::chooseRecording);
+  connect(reload_recording, &QPushButton::clicked, this, &MonoCameraPage::loadRecording);
+  connect(select_all, &QPushButton::clicked, this, [this] { setReviewSelection(true); });
+  connect(select_none, &QPushButton::clicked, this, [this] { setReviewSelection(false); });
+  connect(import, &QPushButton::clicked, this, &MonoCameraPage::importSelectedFrames);
 
   auto* calibration_group = new QGroupBox("7 x 7 circles mono calibration (30 mm spacing)");
   auto* form = new QFormLayout(calibration_group);
@@ -262,7 +335,8 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   form->addRow("Output YAML:", pathRow(output_, "Browse", [this] { chooseOutput(); }));
   calibrate_button_ = new QPushButton("Calibrate selected camera");
   form->addRow(calibrate_button_);
-  root->addWidget(calibration_group);
+  calibration_root->addWidget(calibration_group);
+  calibration_root->addStretch();
   connect(calibrate_button_, &QPushButton::clicked, this, &MonoCameraPage::calibrate);
 
   status_ = new QLabel("Ready");
@@ -278,6 +352,7 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
 MonoCameraPage::~MonoCameraPage() { deactivate(); }
 
 void MonoCameraPage::deactivate() {
+  stopRecording(false);
   camera_->close();
   setStreamingUi(false);
 }
@@ -304,6 +379,7 @@ void MonoCameraPage::toggleCamera() {
   if (camera_->running()) {
     deactivate();
     status("Camera stopped");
+    stages_->setCurrentIndex(0);
     return;
   }
   const QString serial = device_->currentData().toString();
@@ -322,6 +398,13 @@ void MonoCameraPage::updateFrame() {
   CapturedFrame frame;
   if (!camera_->latestFrame(frame)) return;
   preview_->showFrame(frame.image);
+  if (recorder_.recording()) {
+    recorder_.submitMono(frame);
+    const auto stats = recorder_.stats();
+    recording_status_->setText(
+        QString("Written %1  queued %2  dropped %3")
+            .arg(stats.written).arg(stats.pending).arg(stats.dropped));
+  }
   try {
     last_focus_ = focus_analyzer_.process(frame.image, focus_roi_);
     if (focus_roi_.area() == 0) {
@@ -371,6 +454,93 @@ void MonoCameraPage::captureImage() {
   status("Saved " + QString::fromStdString(path.string()));
 }
 
+void MonoCameraPage::toggleRecording() {
+  if (recorder_.recording()) {
+    stopRecording(true);
+    return;
+  }
+  if (!camera_->running()) return status("Start the camera before recording", true);
+  const auto directory = std::filesystem::path(session_->text().toStdString()) / "recordings" /
+                         recordingName("mono").toStdString();
+  std::string error;
+  if (!recorder_.startMono(directory, camera_->serialNumber(), recording_rate_->value(), error)) {
+    return status(QString::fromStdString(error), true);
+  }
+  recording_path_->setText(QString::fromStdString(directory.string()));
+  record_button_->setText("Stop recording");
+  recording_rate_->setEnabled(false);
+  recording_status_->setText("Recording...");
+  status("Recording lossless PNG frames in the background");
+}
+
+void MonoCameraPage::stopRecording(const bool open_review) {
+  if (!recorder_.recording()) return;
+  const auto directory = recorder_.directory();
+  recorder_.stop();
+  record_button_->setText("Start recording");
+  recording_rate_->setEnabled(true);
+  const auto stats = recorder_.stats();
+  recording_status_->setText(
+      QString("Stopped: %1 frames, %2 dropped").arg(stats.written).arg(stats.dropped));
+  recording_path_->setText(QString::fromStdString(directory.string()));
+  if (open_review) {
+    loadRecording();
+    stages_->setCurrentIndex(1);
+  }
+}
+
+void MonoCameraPage::chooseRecording() {
+  const QString path = QFileDialog::getExistingDirectory(
+      this, "Choose mono recording", recording_path_->text());
+  if (!path.isEmpty()) {
+    recording_path_->setText(path);
+    loadRecording();
+  }
+}
+
+void MonoCameraPage::loadRecording() {
+  review_list_->clear();
+  const auto frames = listImages(
+      std::filesystem::path(recording_path_->text().toStdString()) / "frames");
+  for (const auto& path : frames) {
+    const QPixmap thumbnail(QString::fromStdString(path.string()));
+    auto* item = new QListWidgetItem(
+        QIcon(thumbnail.scaled(180, 135, Qt::KeepAspectRatio, Qt::SmoothTransformation)),
+        QString::fromStdString(path.filename().string()), review_list_);
+    item->setData(Qt::UserRole, QString::fromStdString(path.string()));
+    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+    item->setCheckState(Qt::Checked);
+  }
+  status(QString("Loaded %1 recorded frame(s)").arg(frames.size()));
+}
+
+void MonoCameraPage::setReviewSelection(const bool selected) {
+  for (int index = 0; index < review_list_->count(); ++index) {
+    review_list_->item(index)->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
+  }
+}
+
+void MonoCameraPage::importSelectedFrames() {
+  const QString label = device_->currentData().toString().isEmpty()
+                            ? QString("camera") : device_->currentData().toString();
+  DatasetWriter writer(session_->text().toStdString());
+  std::size_t imported = 0;
+  std::filesystem::path last_path;
+  for (int index = 0; index < review_list_->count(); ++index) {
+    const auto* item = review_list_->item(index);
+    if (item->checkState() != Qt::Checked) continue;
+    const cv::Mat image = cv::imread(item->data(Qt::UserRole).toString().toStdString(),
+                                     cv::IMREAD_UNCHANGED);
+    std::string error;
+    if (!writer.saveMono(label.toStdString(), image, last_path, error)) {
+      return status(QString::fromStdString(error), true);
+    }
+    ++imported;
+  }
+  if (imported == 0) return status("Select at least one frame", true);
+  images_->setText(QString::fromStdString(last_path.parent_path().string()));
+  status(QString("Added %1 frame(s) to the mono dataset").arg(imported));
+}
 void MonoCameraPage::resetFocus() {
   focus_analyzer_.reset();
   status("Focus peak reset");
@@ -436,6 +606,20 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
     : QWidget(parent), left_camera_(std::make_unique<HikCamera>()),
       right_camera_(std::make_unique<HikCamera>()) {
   auto* root = new QVBoxLayout(this);
+  stages_ = new QTabWidget;
+  auto* live_page = new QWidget;
+  auto* live_root = new QVBoxLayout(live_page);
+  auto* review_page = new QWidget;
+  auto* review_root = new QVBoxLayout(review_page);
+  auto* calibration_page = new QWidget;
+  auto* calibration_root = new QVBoxLayout(calibration_page);
+  stages_->addTab(live_page, "1  Live capture");
+  stages_->addTab(review_page, "2  Review pairs");
+  stages_->addTab(calibration_page, "3  Calibration");
+  root->addWidget(stages_, 1);
+  connect(stages_, &QTabWidget::currentChanged, this, [this](const int index) {
+    if (index != 0 && recorder_.recording()) stopRecording(index == 1);
+  });
   auto* controls = new QHBoxLayout;
   left_device_ = new QComboBox;
   right_device_ = new QComboBox;
@@ -466,7 +650,7 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   controls->addWidget(frame_rate_);
   controls->addWidget(refresh);
   controls->addWidget(start_stop_);
-  root->addLayout(controls);
+  live_root->addLayout(controls);
   connect(refresh, &QPushButton::clicked, this, &StereoCameraPage::refreshDevices);
   connect(start_stop_, &QPushButton::clicked, this, &StereoCameraPage::toggleCameras);
 
@@ -475,10 +659,10 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   right_preview_ = new PreviewLabel;
   previews->addWidget(left_preview_, 1);
   previews->addWidget(right_preview_, 1);
-  root->addLayout(previews, 1);
+  live_root->addLayout(previews, 1);
   pair_status_ = new QLabel("Waiting for stereo frames");
   pair_status_->setAlignment(Qt::AlignCenter);
-  root->addWidget(pair_status_);
+  live_root->addWidget(pair_status_);
 
   auto* capture_group = new QGroupBox("Stereo pair capture");
   auto* capture_layout = new QVBoxLayout(capture_group);
@@ -494,9 +678,50 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   captures_->setMaximumHeight(90);
   capture_layout->addLayout(session_row);
   capture_layout->addWidget(captures_);
-  root->addWidget(capture_group);
+  live_root->addWidget(capture_group);
   connect(choose_session, &QPushButton::clicked, this, &StereoCameraPage::chooseSession);
   connect(capture, &QPushButton::clicked, this, &StereoCameraPage::capturePair);
+  auto* recording_row = new QHBoxLayout;
+  recording_rate_ = new QDoubleSpinBox;
+  recording_rate_->setRange(0.2, 10.0);
+  recording_rate_->setValue(3.0);
+  recording_rate_->setSuffix(" FPS");
+  record_button_ = new QPushButton("Start stereo recording");
+  recording_status_ = new QLabel("Not recording");
+  recording_row->addWidget(new QLabel("Recording rate:"));
+  recording_row->addWidget(recording_rate_);
+  recording_row->addWidget(record_button_);
+  recording_row->addWidget(recording_status_, 1);
+  capture_layout->addLayout(recording_row);
+  connect(record_button_, &QPushButton::clicked, this, &StereoCameraPage::toggleRecording);
+
+  auto* recording_select = new QHBoxLayout;
+  recording_path_ = new QLineEdit;
+  recording_path_->setReadOnly(true);
+  auto* browse_recording = new QPushButton("Open recording");
+  auto* reload_recording = new QPushButton("Reload");
+  recording_select->addWidget(new QLabel("Recording:"));
+  recording_select->addWidget(recording_path_, 1);
+  recording_select->addWidget(browse_recording);
+  recording_select->addWidget(reload_recording);
+  review_root->addLayout(recording_select);
+  review_list_ = new QListWidget;
+  configureReviewList(review_list_);
+  review_root->addWidget(review_list_, 1);
+  auto* review_actions = new QHBoxLayout;
+  auto* select_all = new QPushButton("Select all");
+  auto* select_none = new QPushButton("Select none");
+  auto* import = new QPushButton("Add selected pairs to dataset");
+  review_actions->addWidget(select_all);
+  review_actions->addWidget(select_none);
+  review_actions->addStretch();
+  review_actions->addWidget(import);
+  review_root->addLayout(review_actions);
+  connect(browse_recording, &QPushButton::clicked, this, &StereoCameraPage::chooseRecording);
+  connect(reload_recording, &QPushButton::clicked, this, &StereoCameraPage::loadRecording);
+  connect(select_all, &QPushButton::clicked, this, [this] { setReviewSelection(true); });
+  connect(select_none, &QPushButton::clicked, this, [this] { setReviewSelection(false); });
+  connect(import, &QPushButton::clicked, this, &StereoCameraPage::importSelectedPairs);
 
   auto* calibration_group = new QGroupBox("Four-ArUco stereo calibration");
   auto* form = new QFormLayout(calibration_group);
@@ -509,7 +734,8 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   form->addRow("Output YAML:", pathRow(output_, "Browse", [this] { chooseOutput(); }));
   calibrate_button_ = new QPushButton("Calibrate stereo cameras");
   form->addRow(calibrate_button_);
-  root->addWidget(calibration_group);
+  calibration_root->addWidget(calibration_group);
+  calibration_root->addStretch();
   connect(calibrate_button_, &QPushButton::clicked, this, &StereoCameraPage::calibrate);
 
   status_ = new QLabel("Ready");
@@ -585,6 +811,13 @@ void StereoCameraPage::updateFrames() {
         std::chrono::duration<double>(left.received_at - right.received_at).count()) * 1000.0;
     pair_status_->setText(QString("Latest receive-time delta: %1 ms").arg(delta_ms, 0, 'f', 1));
     pair_status_->setStyleSheet(delta_ms > 150.0 ? "color: #c03030; font-weight: bold;" : "");
+    if (recorder_.recording() && delta_ms <= 150.0) {
+      recorder_.submitStereo(left, right);
+      const auto stats = recorder_.stats();
+      recording_status_->setText(
+          QString("Written %1 pairs  queued %2  dropped %3")
+              .arg(stats.written).arg(stats.pending).arg(stats.dropped));
+    }
   }
 }
 
@@ -623,6 +856,101 @@ void StereoCameraPage::capturePair() {
   status("Saved stereo pair " + QString::fromStdString(left_path.filename().string()));
 }
 
+void StereoCameraPage::toggleRecording() {
+  if (recorder_.recording()) {
+    stopRecording(true);
+    return;
+  }
+  if (!left_camera_->running() || !right_camera_->running()) {
+    return status("Start both cameras before recording", true);
+  }
+  const auto directory = std::filesystem::path(session_->text().toStdString()) / "recordings" /
+                         recordingName("stereo").toStdString();
+  std::string error;
+  if (!recorder_.startStereo(directory, left_camera_->serialNumber(),
+                             right_camera_->serialNumber(), recording_rate_->value(), error)) {
+    return status(QString::fromStdString(error), true);
+  }
+  recording_path_->setText(QString::fromStdString(directory.string()));
+  record_button_->setText("Stop stereo recording");
+  recording_rate_->setEnabled(false);
+  recording_status_->setText("Recording synchronized pairs...");
+  status("Recording lossless stereo PNG pairs in the background");
+}
+
+void StereoCameraPage::stopRecording(const bool open_review) {
+  if (!recorder_.recording()) return;
+  const auto directory = recorder_.directory();
+  recorder_.stop();
+  record_button_->setText("Start stereo recording");
+  recording_rate_->setEnabled(true);
+  const auto stats = recorder_.stats();
+  recording_status_->setText(
+      QString("Stopped: %1 pairs, %2 dropped").arg(stats.written).arg(stats.dropped));
+  recording_path_->setText(QString::fromStdString(directory.string()));
+  if (open_review) {
+    loadRecording();
+    stages_->setCurrentIndex(1);
+  }
+}
+
+void StereoCameraPage::chooseRecording() {
+  const QString path = QFileDialog::getExistingDirectory(
+      this, "Choose stereo recording", recording_path_->text());
+  if (!path.isEmpty()) {
+    recording_path_->setText(path);
+    loadRecording();
+  }
+}
+
+void StereoCameraPage::loadRecording() {
+  review_list_->clear();
+  const std::filesystem::path root(recording_path_->text().toStdString());
+  const auto left_frames = listImages(root / "left");
+  for (const auto& left : left_frames) {
+    const auto right = root / "right" / left.filename();
+    if (!std::filesystem::exists(right)) continue;
+    const QPixmap thumbnail(QString::fromStdString(left.string()));
+    auto* item = new QListWidgetItem(
+        QIcon(thumbnail.scaled(180, 135, Qt::KeepAspectRatio, Qt::SmoothTransformation)),
+        QString::fromStdString(left.filename().string()), review_list_);
+    item->setData(Qt::UserRole, QString::fromStdString(left.string()));
+    item->setData(Qt::UserRole + 1, QString::fromStdString(right.string()));
+    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+    item->setCheckState(Qt::Checked);
+  }
+  status(QString("Loaded %1 recorded stereo pair(s)").arg(review_list_->count()));
+}
+
+void StereoCameraPage::setReviewSelection(const bool selected) {
+  for (int index = 0; index < review_list_->count(); ++index) {
+    review_list_->item(index)->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
+  }
+}
+
+void StereoCameraPage::importSelectedPairs() {
+  DatasetWriter writer(session_->text().toStdString());
+  std::size_t imported = 0;
+  std::filesystem::path last_left;
+  std::filesystem::path last_right;
+  for (int index = 0; index < review_list_->count(); ++index) {
+    const auto* item = review_list_->item(index);
+    if (item->checkState() != Qt::Checked) continue;
+    const cv::Mat left = cv::imread(item->data(Qt::UserRole).toString().toStdString(),
+                                    cv::IMREAD_UNCHANGED);
+    const cv::Mat right = cv::imread(item->data(Qt::UserRole + 1).toString().toStdString(),
+                                     cv::IMREAD_UNCHANGED);
+    std::string error;
+    if (!writer.saveStereoPair(left, right, last_left, last_right, error)) {
+      return status(QString::fromStdString(error), true);
+    }
+    ++imported;
+  }
+  if (imported == 0) return status("Select at least one stereo pair", true);
+  left_images_->setText(QString::fromStdString(last_left.parent_path().string()));
+  right_images_->setText(QString::fromStdString(last_right.parent_path().string()));
+  status(QString("Added %1 pair(s) to the stereo dataset").arg(imported));
+}
 void StereoCameraPage::chooseLeftImages() {
   const QString path = QFileDialog::getExistingDirectory(this, "Choose left images");
   if (!path.isEmpty()) left_images_->setText(path);
