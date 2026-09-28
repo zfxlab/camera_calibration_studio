@@ -5,6 +5,13 @@ capture:
   gain: 0.0
   frame_rate: 10.0
   sdk_buffer_count: 4
+focus:
+  processing_rate_hz: 10.0
+  smoothing_alpha: 0.20
+  default_roi_fraction: 0.30
+  dark_threshold: 10
+  bright_threshold: 245
+  clipping_warning_ratio: 0.05
 mono_target:
   type: "symmetric_circles"
   columns: 7
@@ -16,4 +23,3 @@ stereo_target:
   marker_length_m: 0.20
   center_spacing_x_m: 1.10
   center_spacing_y_m: 0.70
-

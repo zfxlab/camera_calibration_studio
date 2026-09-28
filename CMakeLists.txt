@@ -17,6 +17,7 @@ find_package(HikMVS REQUIRED)
 add_library(calibration_core
   src/calibration.cpp
   src/dataset.cpp
+  src/focus_analyzer.cpp
 )
 target_include_directories(calibration_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -33,7 +34,9 @@ target_link_libraries(hik_camera_backend PUBLIC HikMVS::MvCameraControl ${OpenCV
 add_executable(camera_calibration_studio
   apps/studio_main.cpp
   include/camera_calibration_studio/main_window.hpp
+  include/camera_calibration_studio/workflow_pages.hpp
   src/main_window.cpp
+  src/workflow_pages.cpp
 )
 target_include_directories(camera_calibration_studio PRIVATE include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(camera_calibration_studio PRIVATE

@@ -4,4 +4,4 @@
 *.user
 *.autosave
 .cache
-
+.vscode
