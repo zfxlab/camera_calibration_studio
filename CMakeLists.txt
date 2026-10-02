@@ -18,6 +18,7 @@ add_library(calibration_core
   src/calibration.cpp
   src/dataset.cpp
   src/focus_analyzer.cpp
+  src/review_analysis.cpp
   src/recording.cpp
 )
 target_include_directories(calibration_core PUBLIC
@@ -57,6 +58,9 @@ if(BUILD_TESTING)
   add_executable(calibration_core_test tests/calibration_core_test.cpp)
   target_link_libraries(calibration_core_test PRIVATE calibration_core)
   add_test(NAME calibration_core_test COMMAND calibration_core_test)
+  add_executable(review_analysis_test tests/review_analysis_test.cpp)
+  target_link_libraries(review_analysis_test PRIVATE calibration_core)
+  add_test(NAME review_analysis_test COMMAND review_analysis_test)
 endif()
 
 install(TARGETS camera_calibration_studio calibrate_dataset RUNTIME DESTINATION bin)
