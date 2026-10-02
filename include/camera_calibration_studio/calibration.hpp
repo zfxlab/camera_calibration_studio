@@ -13,6 +13,8 @@ struct MonoOptions {
   cv::Size pattern_size{7, 7};
   double spacing_m{0.03};
   bool rational_model{false};
+  double outlier_minimum_error_px{0.15};
+  double outlier_mad_scale{3.0};
 };
 
 struct Intrinsics {
@@ -81,4 +83,3 @@ bool saveStereoResult(const std::filesystem::path& path,
                       std::string& error);
 
 }  // namespace calibration_studio
-

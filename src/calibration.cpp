@@ -175,8 +175,9 @@ bool Intrinsics::valid() const {
 bool calibrateMono(const std::vector<std::filesystem::path>& images,
                    const MonoOptions& options, Intrinsics& result, std::string& error) {
   if (options.pattern_size.width < 2 || options.pattern_size.height < 2 ||
-      !(options.spacing_m > 0.0)) {
-    error = "invalid circle-grid geometry";
+      !(options.spacing_m > 0.0) || !(options.outlier_minimum_error_px >= 0.0) ||
+      !(options.outlier_mad_scale >= 0.0)) {
+    error = "invalid mono calibration options";
     return false;
   }
   ObjectViews object_views;
@@ -216,12 +217,37 @@ bool calibrateMono(const std::vector<std::filesystem::path>& images,
     return false;
   }
 
-  const double rejection_threshold = std::max(1.5, median(view_errors) * 2.5);
+  const double median_error = median(view_errors);
+  std::vector<double> absolute_deviations;
+  absolute_deviations.reserve(view_errors.size());
+  for (const double view_error : view_errors) {
+    absolute_deviations.push_back(std::abs(view_error - median_error));
+  }
+  constexpr double mad_to_sigma = 1.4826;
+  const double rejection_threshold = std::max(
+      options.outlier_minimum_error_px,
+      median_error + options.outlier_mad_scale * mad_to_sigma * median(absolute_deviations));
+
+  std::vector<std::size_t> outlier_indices;
+  for (std::size_t index = 0; index < view_errors.size(); ++index) {
+    if (view_errors[index] > rejection_threshold) outlier_indices.push_back(index);
+  }
+  std::sort(outlier_indices.begin(), outlier_indices.end(), [&view_errors](const auto left,
+                                                                           const auto right) {
+    return view_errors[left] > view_errors[right];
+  });
+  const std::size_t rejection_count =
+      std::min(outlier_indices.size(), accepted.size() - 8);
+  std::vector<bool> reject_view(accepted.size(), false);
+  for (std::size_t index = 0; index < rejection_count; ++index) {
+    reject_view[outlier_indices[index]] = true;
+  }
+
   ObjectViews filtered_objects;
   ImageViews filtered_images;
   std::vector<std::filesystem::path> filtered_paths;
   for (std::size_t index = 0; index < view_errors.size(); ++index) {
-    if (view_errors[index] <= rejection_threshold || accepted.size() <= 8) {
+    if (!reject_view[index]) {
       filtered_objects.push_back(object_views[index]);
       filtered_images.push_back(image_views[index]);
       filtered_paths.push_back(accepted[index]);
