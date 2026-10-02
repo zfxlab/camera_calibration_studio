@@ -4,13 +4,15 @@
 #include "camera_calibration_studio/dataset.hpp"
 
 #include <QComboBox>
+#include <QBrush>
+#include <QCheckBox>
+#include <QColor>
 #include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QIcon>
 #include <QImage>
 #include <QLineEdit>
 #include <QListWidget>
@@ -22,18 +24,23 @@
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QThread>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 
 namespace calibration_studio {
 namespace {
@@ -80,11 +87,90 @@ void fillDeviceCombo(QComboBox* combo, const std::vector<CameraDescriptor>& devi
 }
 
 void configureReviewList(QListWidget* list) {
-  list->setViewMode(QListView::IconMode);
-  list->setIconSize(QSize(180, 135));
-  list->setGridSize(QSize(210, 180));
-  list->setResizeMode(QListView::Adjust);
+  list->setViewMode(QListView::ListMode);
   list->setMovement(QListView::Static);
+  list->setAlternatingRowColors(true);
+  list->setUniformItemSizes(true);
+}
+
+QString monoDecisionText(const MonoFrameAnalysis& result) {
+  switch (result.decision) {
+    case MonoFrameDecision::keep:
+      return result.low_sharpness || result.exposure_warning ? "KEEP/WARN" : "KEEP";
+    case MonoFrameDecision::duplicate:
+      return "SKIP/DUPLICATE";
+    case MonoFrameDecision::redundant:
+      return "SKIP/REDUNDANT";
+    case MonoFrameDecision::unreadable:
+      return "SKIP/UNREADABLE";
+    case MonoFrameDecision::size_mismatch:
+      return "SKIP/SIZE";
+    case MonoFrameDecision::pattern_not_found:
+      return "SKIP/NO GRID";
+  }
+  return "SKIP";
+}
+
+QString monoAnalysisText(const MonoFrameAnalysis& result) {
+  QString text = QString("%1  [%2]  grid %3/49  sharp %4  mean %5")
+                     .arg(QString::fromStdString(result.path.filename().string()))
+                     .arg(monoDecisionText(result))
+                     .arg(result.detected_points)
+                     .arg(result.sharpness, 0, 'f', 0)
+                     .arg(result.mean_brightness, 0, 'f', 1);
+  if (result.decision == MonoFrameDecision::keep) {
+    text += QString("  center (%1, %2)  coverage %3%  roll %4 deg")
+                .arg(result.normalized_center.x, 0, 'f', 2)
+                .arg(result.normalized_center.y, 0, 'f', 2)
+                .arg(result.image_coverage * 100.0, 0, 'f', 1)
+                .arg(result.board_angle_deg, 0, 'f', 1);
+    if (result.pose_estimated) {
+      text += QString("  tilt x %1 / y %2 / total %3 deg  pose err %4 px")
+                  .arg(result.tilt_x_deg, 0, 'f', 1)
+                  .arg(result.tilt_y_deg, 0, 'f', 1)
+                  .arg(result.total_tilt_deg, 0, 'f', 1)
+                  .arg(result.pose_reprojection_error_px, 0, 'f', 2);
+    } else {
+      text += "  tilt unavailable";
+    }
+    if (result.low_sharpness) text += "  low sharpness";
+    if (result.exposure_warning) text += "  exposure warning";
+  } else if (result.decision == MonoFrameDecision::duplicate ||
+             result.decision == MonoFrameDecision::redundant) {
+    text += QString("  nearest selected %1 (distance %2)")
+                .arg(QString::fromStdString(result.duplicate_of.filename().string()))
+                .arg(result.duplicate_distance, 0, 'f', 4);
+    if (result.pose_estimated) {
+      text += QString("  tilt x %1 / y %2 / total %3 deg")
+                  .arg(result.tilt_x_deg, 0, 'f', 1)
+                  .arg(result.tilt_y_deg, 0, 'f', 1)
+                  .arg(result.total_tilt_deg, 0, 'f', 1);
+    }
+  } else if (!result.image_size.empty()) {
+    text += QString("  size %1x%2").arg(result.image_size.width).arg(result.image_size.height);
+  }
+  return text;
+}
+
+void showReviewImage(PreviewLabel* preview, const QString& path,
+                     const bool draw_circle_grid) {
+  if (preview == nullptr || path.isEmpty()) return;
+  const cv::Mat gray = cv::imread(path.toStdString(), cv::IMREAD_GRAYSCALE);
+  if (gray.empty()) {
+    preview->clear();
+    preview->setText("Unable to read image");
+    return;
+  }
+  cv::Mat display;
+  cv::cvtColor(gray, display, cv::COLOR_GRAY2BGR);
+  if (draw_circle_grid) {
+    std::vector<cv::Point2f> centers;
+    const bool found = cv::findCirclesGrid(
+        gray, cv::Size(7, 7), centers,
+        cv::CALIB_CB_SYMMETRIC_GRID | cv::CALIB_CB_CLUSTERING);
+    cv::drawChessboardCorners(display, cv::Size(7, 7), centers, found);
+  }
+  preview->showFrame(display);
 }
 
 QString recordingName(const QString& prefix) {
@@ -311,20 +397,47 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   review_root->addLayout(recording_select);
   review_list_ = new QListWidget;
   configureReviewList(review_list_);
-  review_root->addWidget(review_list_, 1);
+  auto* review_content = new QHBoxLayout;
+  review_content->addWidget(review_list_, 2);
+  review_preview_ = new PreviewLabel;
+  review_preview_->setText("Select a frame to view it");
+  review_content->addWidget(review_preview_, 1);
+  review_root->addLayout(review_content, 1);
+  review_summary_ = new QLabel("Load a recording, then analyze quality and pose diversity.");
+  review_summary_->setWordWrap(true);
+  review_root->addWidget(review_summary_);
   auto* review_actions = new QHBoxLayout;
   auto* select_all = new QPushButton("Select all");
   auto* select_none = new QPushButton("Select none");
+  target_frames_ = new QSpinBox;
+  target_frames_->setRange(8, 100);
+  target_frames_->setValue(30);
+  target_frames_->setSuffix(" frames");
+  analyze_review_button_ = new QPushButton("Analyze and recommend");
   auto* import = new QPushButton("Add selected frames to dataset");
   review_actions->addWidget(select_all);
   review_actions->addWidget(select_none);
+  review_actions->addWidget(new QLabel("Target:"));
+  review_actions->addWidget(target_frames_);
+  review_actions->addWidget(analyze_review_button_);
   review_actions->addStretch();
   review_actions->addWidget(import);
   review_root->addLayout(review_actions);
   connect(browse_recording, &QPushButton::clicked, this, &MonoCameraPage::chooseRecording);
   connect(reload_recording, &QPushButton::clicked, this, &MonoCameraPage::loadRecording);
+  connect(review_list_, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem* current, QListWidgetItem*) {
+    if (current == nullptr) {
+      review_preview_->clear();
+      review_preview_->setText("Select a frame to view it");
+      return;
+    }
+    showReviewImage(review_preview_, current->data(Qt::UserRole).toString(), true);
+  });
   connect(select_all, &QPushButton::clicked, this, [this] { setReviewSelection(true); });
   connect(select_none, &QPushButton::clicked, this, [this] { setReviewSelection(false); });
+  connect(analyze_review_button_, &QPushButton::clicked,
+          this, &MonoCameraPage::analyzeReviewFrames);
   connect(import, &QPushButton::clicked, this, &MonoCameraPage::importSelectedFrames);
 
   auto* calibration_group = new QGroupBox("7 x 7 circles mono calibration (30 mm spacing)");
@@ -336,8 +449,68 @@ MonoCameraPage::MonoCameraPage(QWidget* parent)
   calibrate_button_ = new QPushButton("Calibrate selected camera");
   form->addRow(calibrate_button_);
   calibration_root->addWidget(calibration_group);
-  calibration_root->addStretch();
+
+  calibration_details_ = new QTabWidget;
+  auto* calibration_input_page = new QWidget;
+  auto* calibration_input_root = new QVBoxLayout(calibration_input_page);
+  calibration_selection_summary_ = new QLabel("Choose an image directory to load candidates.");
+  calibration_input_root->addWidget(calibration_selection_summary_);
+  auto* calibration_input_content = new QHBoxLayout;
+  calibration_images_list_ = new QListWidget;
+  configureReviewList(calibration_images_list_);
+  calibration_input_content->addWidget(calibration_images_list_, 2);
+  calibration_image_preview_ = new PreviewLabel;
+  calibration_image_preview_->setText("Select a calibration image to view it");
+  calibration_input_content->addWidget(calibration_image_preview_, 1);
+  calibration_input_root->addLayout(calibration_input_content, 1);
+  auto* calibration_input_actions = new QHBoxLayout;
+  auto* select_all_calibration = new QPushButton("Select all");
+  auto* select_no_calibration = new QPushButton("Select none");
+  calibration_input_actions->addWidget(select_all_calibration);
+  calibration_input_actions->addWidget(select_no_calibration);
+  calibration_input_actions->addStretch();
+  calibration_input_root->addLayout(calibration_input_actions);
+
+  auto* calibration_result_page = new QWidget;
+  auto* calibration_result_root = new QVBoxLayout(calibration_result_page);
+  calibration_result_summary_ = new QLabel("Run calibration to view the result.");
+  calibration_result_summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  calibration_result_summary_->setWordWrap(true);
+  calibration_result_root->addWidget(calibration_result_summary_);
+  auto* calibration_result_content = new QHBoxLayout;
+  calibration_result_list_ = new QListWidget;
+  configureReviewList(calibration_result_list_);
+  calibration_result_content->addWidget(calibration_result_list_, 2);
+  calibration_result_preview_ = new PreviewLabel;
+  calibration_result_preview_->setText("Select a result row to view it");
+  calibration_result_content->addWidget(calibration_result_preview_, 1);
+  calibration_result_root->addLayout(calibration_result_content, 1);
+  show_undistorted_ = new QCheckBox("Show undistorted preview");
+  show_undistorted_->setEnabled(false);
+  calibration_result_root->addWidget(show_undistorted_);
+
+  calibration_details_->addTab(calibration_input_page, "Input selection");
+  calibration_details_->addTab(calibration_result_page, "Calibration result");
+  calibration_root->addWidget(calibration_details_, 1);
   connect(calibrate_button_, &QPushButton::clicked, this, &MonoCameraPage::calibrate);
+  connect(images_, &QLineEdit::editingFinished, this, [this] {
+    loadCalibrationImages(images_->text());
+  });
+  connect(select_all_calibration, &QPushButton::clicked, this,
+          [this] { setCalibrationSelection(true); });
+  connect(select_no_calibration, &QPushButton::clicked, this,
+          [this] { setCalibrationSelection(false); });
+  connect(calibration_images_list_, &QListWidget::itemChanged, this,
+          [this](QListWidgetItem*) { updateCalibrationSelectionSummary(); });
+  connect(calibration_images_list_, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem* current, QListWidgetItem*) {
+    if (current == nullptr) return;
+    showReviewImage(calibration_image_preview_, current->data(Qt::UserRole).toString(), true);
+  });
+  connect(calibration_result_list_, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem*, QListWidgetItem*) { updateCalibrationResultPreview(); });
+  connect(show_undistorted_, &QCheckBox::toggled, this,
+          [this](bool) { updateCalibrationResultPreview(); });
 
   status_ = new QLabel("Ready");
   root->addWidget(status_);
@@ -499,19 +672,122 @@ void MonoCameraPage::chooseRecording() {
 }
 
 void MonoCameraPage::loadRecording() {
+  ++review_generation_;
   review_list_->clear();
   const auto frames = listImages(
       std::filesystem::path(recording_path_->text().toStdString()) / "frames");
   for (const auto& path : frames) {
-    const QPixmap thumbnail(QString::fromStdString(path.string()));
-    auto* item = new QListWidgetItem(
-        QIcon(thumbnail.scaled(180, 135, Qt::KeepAspectRatio, Qt::SmoothTransformation)),
-        QString::fromStdString(path.filename().string()), review_list_);
+    auto* item = new QListWidgetItem(QString::fromStdString(path.filename().string()),
+                                     review_list_);
     item->setData(Qt::UserRole, QString::fromStdString(path.string()));
     item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
     item->setCheckState(Qt::Checked);
   }
+  if (!frames.empty()) review_list_->setCurrentRow(0);
+  analyze_review_button_->setEnabled(!frames.empty() && !review_analysis_running_);
+  target_frames_->setEnabled(!review_analysis_running_);
+  review_summary_->setText(
+      QString("Loaded %1 frame(s). Analysis has not been run; all frames are selected.")
+          .arg(frames.size()));
   status(QString("Loaded %1 recorded frame(s)").arg(frames.size()));
+}
+
+void MonoCameraPage::analyzeReviewFrames() {
+  if (review_analysis_running_) return;
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(static_cast<std::size_t>(review_list_->count()));
+  for (int index = 0; index < review_list_->count(); ++index) {
+    paths.emplace_back(review_list_->item(index)->data(Qt::UserRole).toString().toStdString());
+  }
+  if (paths.empty()) return status("Load a recording before analysis", true);
+
+  const std::size_t generation = review_generation_;
+  MonoReviewOptions options;
+  options.target_frame_count = static_cast<std::size_t>(target_frames_->value());
+  analyze_review_button_->setEnabled(false);
+  target_frames_->setEnabled(false);
+  review_analysis_running_ = true;
+  review_summary_->setText(QString("Analyzing %1 frame(s) in the background...")
+                               .arg(paths.size()));
+  status("Detecting circle grids and comparing pose diversity...");
+  QPointer<MonoCameraPage> self(this);
+  auto* thread = QThread::create([self, paths = std::move(paths), options, generation] {
+    const auto progress = [self, generation](const std::string& stage,
+                                             const std::size_t current,
+                                             const std::size_t total) {
+      if (self) QMetaObject::invokeMethod(self, [self, generation, stage, current, total] {
+        if (!self || generation != self->review_generation_) return;
+        const QString message = current == 0
+                                    ? QString::fromStdString(stage)
+                                    : QString("%1: %2 / %3")
+                                          .arg(QString::fromStdString(stage))
+                                          .arg(current)
+                                          .arg(total);
+        self->review_summary_->setText(message);
+        self->status(message);
+      });
+    };
+    const auto results = analyzeMonoFrames(paths, options, progress);
+    if (self) QMetaObject::invokeMethod(self, [self, results, generation] {
+      if (self) self->applyReviewAnalysis(results, generation);
+    });
+  });
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  thread->start();
+}
+
+void MonoCameraPage::applyReviewAnalysis(const std::vector<MonoFrameAnalysis>& results,
+                                         const std::size_t generation) {
+  review_analysis_running_ = false;
+  analyze_review_button_->setEnabled(review_list_->count() > 0);
+  target_frames_->setEnabled(true);
+  if (generation != review_generation_) return;
+  std::size_t kept = 0;
+  std::size_t duplicates = 0;
+  std::size_t redundant = 0;
+  std::size_t failed = 0;
+  std::size_t warnings = 0;
+  std::size_t poses = 0;
+  const std::size_t count =
+      std::min(results.size(), static_cast<std::size_t>(review_list_->count()));
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto& result = results[index];
+    if (result.pose_estimated) ++poses;
+    auto* item = review_list_->item(static_cast<int>(index));
+    item->setText(monoAnalysisText(result));
+    item->setToolTip(item->text());
+    item->setCheckState(result.recommended ? Qt::Checked : Qt::Unchecked);
+    if (result.recommended) {
+      ++kept;
+      if (result.low_sharpness || result.exposure_warning) {
+        ++warnings;
+        item->setForeground(QBrush(QColor(170, 110, 0)));
+      } else {
+        item->setForeground(QBrush(QColor(0, 125, 55)));
+      }
+    } else if (result.decision == MonoFrameDecision::duplicate) {
+      ++duplicates;
+      item->setForeground(QBrush(QColor(115, 115, 115)));
+    } else if (result.decision == MonoFrameDecision::redundant) {
+      ++redundant;
+      item->setForeground(QBrush(QColor(90, 90, 140)));
+    } else {
+      ++failed;
+      item->setForeground(QBrush(QColor(185, 40, 40)));
+    }
+  }
+  review_summary_->setText(
+      QString("Recommended %1 of %2: %3 duplicate, %4 redundant beyond target, "
+              "%5 invalid, %6 warning, %7 poses estimated. "
+              "The checkboxes are editable; no source files were deleted.")
+          .arg(kept)
+          .arg(results.size())
+          .arg(duplicates)
+          .arg(redundant)
+          .arg(failed)
+          .arg(warnings)
+          .arg(poses));
+  status(QString("Analysis complete: %1 recommended frame(s)").arg(kept), kept < 8);
 }
 
 void MonoCameraPage::setReviewSelection(const bool selected) {
@@ -539,6 +815,7 @@ void MonoCameraPage::importSelectedFrames() {
   }
   if (imported == 0) return status("Select at least one frame", true);
   images_->setText(QString::fromStdString(last_path.parent_path().string()));
+  loadCalibrationImages(images_->text());
   status(QString("Added %1 frame(s) to the mono dataset").arg(imported));
 }
 void MonoCameraPage::resetFocus() {
@@ -548,7 +825,111 @@ void MonoCameraPage::resetFocus() {
 
 void MonoCameraPage::chooseImages() {
   const QString path = QFileDialog::getExistingDirectory(this, "Choose mono images");
-  if (!path.isEmpty()) images_->setText(path);
+  if (!path.isEmpty()) {
+    images_->setText(path);
+    loadCalibrationImages(path);
+  }
+}
+
+void MonoCameraPage::loadCalibrationImages(const QString& directory) {
+  const auto paths = listImages(directory.toStdString());
+  {
+    const QSignalBlocker blocker(calibration_images_list_);
+    calibration_images_list_->clear();
+    for (const auto& path : paths) {
+      auto* item = new QListWidgetItem(QString::fromStdString(path.filename().string()),
+                                       calibration_images_list_);
+      item->setData(Qt::UserRole, QString::fromStdString(path.string()));
+      item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+      item->setCheckState(Qt::Checked);
+    }
+  }
+  if (!paths.empty()) calibration_images_list_->setCurrentRow(0);
+  updateCalibrationSelectionSummary();
+  calibration_details_->setCurrentIndex(0);
+}
+
+void MonoCameraPage::setCalibrationSelection(const bool selected) {
+  const QSignalBlocker blocker(calibration_images_list_);
+  for (int index = 0; index < calibration_images_list_->count(); ++index) {
+    calibration_images_list_->item(index)->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
+  }
+  updateCalibrationSelectionSummary();
+}
+
+void MonoCameraPage::updateCalibrationSelectionSummary() {
+  int selected = 0;
+  for (int index = 0; index < calibration_images_list_->count(); ++index) {
+    if (calibration_images_list_->item(index)->checkState() == Qt::Checked) ++selected;
+  }
+  calibration_selection_summary_->setText(
+      QString("Selected %1 of %2 image(s). Only checked images enter calibration; at least 8 "
+              "valid circle-grid images are required.")
+          .arg(selected)
+          .arg(calibration_images_list_->count()));
+}
+
+void MonoCameraPage::applyCalibrationResult(const Intrinsics& result) {
+  last_intrinsics_ = result;
+  const cv::Mat& matrix = result.camera_matrix;
+  QStringList distortion;
+  const cv::Mat flattened = result.distortion.reshape(1, 1);
+  for (int column = 0; column < flattened.cols; ++column) {
+    distortion << QString::number(flattened.at<double>(0, column), 'g', 10);
+  }
+  calibration_result_summary_->setText(
+      QString("RMS: %1 px    Image: %2 x %3    Used: %4    Rejected: %5\n"
+              "fx=%6  fy=%7  cx=%8  cy=%9\nDistortion: [%10]")
+          .arg(result.rms_px, 0, 'f', 4)
+          .arg(result.image_size.width)
+          .arg(result.image_size.height)
+          .arg(result.used_images.size())
+          .arg(result.rejected_images.size())
+          .arg(matrix.at<double>(0, 0), 0, 'g', 10)
+          .arg(matrix.at<double>(1, 1), 0, 'g', 10)
+          .arg(matrix.at<double>(0, 2), 0, 'g', 10)
+          .arg(matrix.at<double>(1, 2), 0, 'g', 10)
+          .arg(distortion.join(", ")));
+
+  calibration_result_list_->clear();
+  for (std::size_t index = 0; index < result.used_images.size(); ++index) {
+    const double error = index < result.per_view_error_px.size()
+                             ? result.per_view_error_px[index]
+                             : std::numeric_limits<double>::quiet_NaN();
+    auto* item = new QListWidgetItem(
+        QString("%1  [USED]  error %2 px")
+            .arg(QString::fromStdString(result.used_images[index].filename().string()))
+            .arg(error, 0, 'f', 3),
+        calibration_result_list_);
+    item->setData(Qt::UserRole, QString::fromStdString(result.used_images[index].string()));
+    item->setForeground(QBrush(QColor(0, 125, 55)));
+  }
+  for (const auto& path : result.rejected_images) {
+    auto* item = new QListWidgetItem(
+        QString("%1  [REJECTED]").arg(QString::fromStdString(path.filename().string())),
+        calibration_result_list_);
+    item->setData(Qt::UserRole, QString::fromStdString(path.string()));
+    item->setForeground(QBrush(QColor(185, 40, 40)));
+  }
+  show_undistorted_->setEnabled(result.valid());
+  if (calibration_result_list_->count() > 0) calibration_result_list_->setCurrentRow(0);
+  calibration_details_->setCurrentIndex(1);
+}
+
+void MonoCameraPage::updateCalibrationResultPreview() {
+  const auto* item = calibration_result_list_->currentItem();
+  if (item == nullptr) return;
+  const QString path = item->data(Qt::UserRole).toString();
+  if (!show_undistorted_->isChecked() || !last_intrinsics_.valid()) {
+    showReviewImage(calibration_result_preview_, path, true);
+    return;
+  }
+  const cv::Mat gray = cv::imread(path.toStdString(), cv::IMREAD_GRAYSCALE);
+  if (gray.empty()) return;
+  cv::Mat corrected;
+  cv::undistort(gray, corrected, last_intrinsics_.camera_matrix,
+                last_intrinsics_.distortion);
+  calibration_result_preview_->showFrame(corrected);
 }
 
 void MonoCameraPage::chooseOutput() {
@@ -560,25 +941,37 @@ void MonoCameraPage::calibrate() {
   if (images_->text().isEmpty() || output_->text().isEmpty()) {
     return status("Choose images and output YAML", true);
   }
+  if (calibration_images_list_->count() == 0) loadCalibrationImages(images_->text());
+  std::vector<std::filesystem::path> selected_images;
+  for (int index = 0; index < calibration_images_list_->count(); ++index) {
+    const auto* item = calibration_images_list_->item(index);
+    if (item->checkState() == Qt::Checked) {
+      selected_images.emplace_back(item->data(Qt::UserRole).toString().toStdString());
+    }
+  }
+  if (selected_images.size() < 8) {
+    return status("Select at least 8 calibration images", true);
+  }
   calibrate_button_->setEnabled(false);
   status("Running mono calibration...");
-  const QString images = images_->text();
   const QString output = output_->text();
   const QString name = camera_name_->text();
   QPointer<MonoCameraPage> self(this);
-  auto* thread = QThread::create([self, images, output, name] {
+  auto* thread = QThread::create([self, selected_images = std::move(selected_images),
+                                  output, name] {
     Intrinsics result;
     std::string error;
-    bool ok = calibrateMono(listImages(images.toStdString()), {}, result, error);
+    bool ok = calibrateMono(selected_images, {}, result, error);
     if (ok) ok = saveIntrinsics(output.toStdString(), name.toStdString(), result, error);
     const QString message = ok
         ? QString("Saved intrinsics: RMS=%1 px, used=%2, rejected=%3")
               .arg(result.rms_px, 0, 'f', 4).arg(result.used_images.size())
               .arg(result.rejected_images.size())
         : QString::fromStdString(error);
-    if (self) QMetaObject::invokeMethod(self, [self, ok, message] {
+    if (self) QMetaObject::invokeMethod(self, [self, ok, message, result] {
       if (!self) return;
       self->calibrate_button_->setEnabled(true);
+      if (ok) self->applyCalibrationResult(result);
       self->status(message, !ok);
     });
   });
@@ -707,7 +1100,21 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   review_root->addLayout(recording_select);
   review_list_ = new QListWidget;
   configureReviewList(review_list_);
-  review_root->addWidget(review_list_, 1);
+  auto* review_content = new QHBoxLayout;
+  review_content->addWidget(review_list_, 2);
+  auto* preview_column = new QVBoxLayout;
+  preview_column->addWidget(new QLabel("Left frame"));
+  left_review_preview_ = new PreviewLabel;
+  left_review_preview_->setMinimumSize(320, 220);
+  left_review_preview_->setText("Select a pair to view it");
+  preview_column->addWidget(left_review_preview_, 1);
+  preview_column->addWidget(new QLabel("Right frame"));
+  right_review_preview_ = new PreviewLabel;
+  right_review_preview_->setMinimumSize(320, 220);
+  right_review_preview_->setText("Select a pair to view it");
+  preview_column->addWidget(right_review_preview_, 1);
+  review_content->addLayout(preview_column, 1);
+  review_root->addLayout(review_content, 1);
   auto* review_actions = new QHBoxLayout;
   auto* select_all = new QPushButton("Select all");
   auto* select_none = new QPushButton("Select none");
@@ -719,6 +1126,18 @@ StereoCameraPage::StereoCameraPage(QWidget* parent)
   review_root->addLayout(review_actions);
   connect(browse_recording, &QPushButton::clicked, this, &StereoCameraPage::chooseRecording);
   connect(reload_recording, &QPushButton::clicked, this, &StereoCameraPage::loadRecording);
+  connect(review_list_, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem* current, QListWidgetItem*) {
+    if (current == nullptr) {
+      left_review_preview_->clear();
+      left_review_preview_->setText("Select a pair to view it");
+      right_review_preview_->clear();
+      right_review_preview_->setText("Select a pair to view it");
+      return;
+    }
+    showReviewImage(left_review_preview_, current->data(Qt::UserRole).toString(), false);
+    showReviewImage(right_review_preview_, current->data(Qt::UserRole + 1).toString(), false);
+  });
   connect(select_all, &QPushButton::clicked, this, [this] { setReviewSelection(true); });
   connect(select_none, &QPushButton::clicked, this, [this] { setReviewSelection(false); });
   connect(import, &QPushButton::clicked, this, &StereoCameraPage::importSelectedPairs);
@@ -910,15 +1329,14 @@ void StereoCameraPage::loadRecording() {
   for (const auto& left : left_frames) {
     const auto right = root / "right" / left.filename();
     if (!std::filesystem::exists(right)) continue;
-    const QPixmap thumbnail(QString::fromStdString(left.string()));
-    auto* item = new QListWidgetItem(
-        QIcon(thumbnail.scaled(180, 135, Qt::KeepAspectRatio, Qt::SmoothTransformation)),
-        QString::fromStdString(left.filename().string()), review_list_);
+    auto* item = new QListWidgetItem(QString::fromStdString(left.filename().string()),
+                                     review_list_);
     item->setData(Qt::UserRole, QString::fromStdString(left.string()));
     item->setData(Qt::UserRole + 1, QString::fromStdString(right.string()));
     item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
     item->setCheckState(Qt::Checked);
   }
+  if (review_list_->count() > 0) review_list_->setCurrentRow(0);
   status(QString("Loaded %1 recorded stereo pair(s)").arg(review_list_->count()));
 }
 
@@ -1033,4 +1451,3 @@ void StereoCameraPage::status(const QString& text, const bool error) {
 }
 
 }  // namespace calibration_studio
-

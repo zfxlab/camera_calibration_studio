@@ -3,6 +3,7 @@
 #include "camera_calibration_studio/focus_analyzer.hpp"
 #include "camera_calibration_studio/hik_camera.hpp"
 #include "camera_calibration_studio/recording.hpp"
+#include "camera_calibration_studio/review_analysis.hpp"
 
 #include <QLabel>
 #include <QWidget>
@@ -12,6 +13,7 @@
 #include <vector>
 
 class QComboBox;
+class QCheckBox;
 class QDoubleSpinBox;
 class QLineEdit;
 class QListWidget;
@@ -63,6 +65,7 @@ class MonoCameraPage final : public QWidget {
   void toggleRecording();
   void chooseRecording();
   void loadRecording();
+  void analyzeReviewFrames();
   void importSelectedFrames();
   void resetFocus();
   void chooseImages();
@@ -76,6 +79,13 @@ class MonoCameraPage final : public QWidget {
 
   void stopRecording(bool open_review);
   void setReviewSelection(bool selected);
+  void applyReviewAnalysis(const std::vector<MonoFrameAnalysis>& results,
+                           std::size_t generation);
+  void loadCalibrationImages(const QString& directory);
+  void setCalibrationSelection(bool selected);
+  void updateCalibrationSelectionSummary();
+  void applyCalibrationResult(const Intrinsics& result);
+  void updateCalibrationResultPreview();
   std::unique_ptr<HikCamera> camera_;
   FocusAnalyzer focus_analyzer_;
   cv::Rect focus_roi_;
@@ -100,10 +110,25 @@ class MonoCameraPage final : public QWidget {
   QLabel* recording_status_{nullptr};
   QLineEdit* recording_path_{nullptr};
   QListWidget* review_list_{nullptr};
+  PreviewLabel* review_preview_{nullptr};
+  QLabel* review_summary_{nullptr};
+  QPushButton* analyze_review_button_{nullptr};
+  QSpinBox* target_frames_{nullptr};
+  std::size_t review_generation_{0};
+  bool review_analysis_running_{false};
   QLineEdit* images_{nullptr};
   QLineEdit* camera_name_{nullptr};
   QLineEdit* output_{nullptr};
   QPushButton* calibrate_button_{nullptr};
+  QTabWidget* calibration_details_{nullptr};
+  QListWidget* calibration_images_list_{nullptr};
+  PreviewLabel* calibration_image_preview_{nullptr};
+  QLabel* calibration_selection_summary_{nullptr};
+  QLabel* calibration_result_summary_{nullptr};
+  QListWidget* calibration_result_list_{nullptr};
+  PreviewLabel* calibration_result_preview_{nullptr};
+  QCheckBox* show_undistorted_{nullptr};
+  Intrinsics last_intrinsics_;
 };
 
 class StereoCameraPage final : public QWidget {
@@ -164,9 +189,10 @@ class StereoCameraPage final : public QWidget {
   QLabel* recording_status_{nullptr};
   QLineEdit* recording_path_{nullptr};
   QListWidget* review_list_{nullptr};
+  PreviewLabel* left_review_preview_{nullptr};
+  PreviewLabel* right_review_preview_{nullptr};
   QLineEdit* output_{nullptr};
   QPushButton* calibrate_button_{nullptr};
 };
 
 }  // namespace calibration_studio
-
